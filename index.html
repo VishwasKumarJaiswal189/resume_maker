@@ -1,0 +1,345 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>ATS Resume Utility</title>
+  <script src="https://cdn.tailwindcss.com"></script>
+  <script crossorigin src="https://unpkg.com/react@18/umd/react.production.min.js"></script>
+  <script crossorigin src="https://unpkg.com/react-dom@18/umd/react-dom.production.min.js"></script>
+  <script src="https://unpkg.com/@babel/standalone/babel.min.js"></script>
+</head>
+<body class="bg-slate-100 text-slate-900 font-sans">
+  <div id="root"></div>
+
+  <script type="text/babel">
+    const { useState, useEffect } = React;
+
+    const TEMPLATES = [
+      { id: "classic", name: "Classic ATS (Serif)" },
+      { id: "modern", name: "Modern Clean (Sans + Accent)" },
+      { id: "compact", name: "Compact 1-Page (Dense)" },
+    ];
+
+    function App() {
+      const [resumeText, setResumeText] = useState("");
+      const [jobDesc, setJobDesc] = useState("");
+      const [extraInstructions, setExtraInstructions] = useState("");
+      const [templateId, setTemplateId] = useState("classic");
+      const [activeModel, setActiveModel] = useState("loading...");
+      const [loading, setLoading] = useState(false);
+      const [error, setError] = useState("");
+
+      const [analysis, setAnalysis] = useState(null);
+      const [structuredResume, setStructuredResume] = useState(null);
+      const [latexCode, setLatexCode] = useState("");
+      const [pdfUrl, setPdfUrl] = useState(null);
+      const [history, setHistory] = useState([]);
+
+      useEffect(() => {
+        const saved = localStorage.getItem("ats_resume_versions");
+        if (saved) setHistory(JSON.parse(saved));
+
+        fetch("/api/config")
+          .then((r) => r.json())
+          .then((d) => setActiveModel(d.active_model))
+          .catch(() => setActiveModel("unknown"));
+      }, []);
+
+      const saveVersion = (entry) => {
+        const updated = [entry, ...history].slice(0, 20);
+        setHistory(updated);
+        localStorage.setItem("ats_resume_versions", JSON.stringify(updated));
+      };
+
+      const renderOutputs = async (structuredData, chosenTemplate) => {
+        if (!structuredData) return;
+        const [pdfRes, texRes] = await Promise.all([
+          fetch("/api/render-pdf", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ structured_resume: structuredData, template_id: chosenTemplate }),
+          }),
+          fetch("/api/render-latex", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({ structured_resume: structuredData, template_id: chosenTemplate }),
+          }),
+        ]);
+
+        if (pdfRes.ok) {
+          const blob = await pdfRes.blob();
+          setPdfUrl(URL.createObjectURL(blob));
+        }
+        if (texRes.ok) {
+          const texData = await texRes.json();
+          setLatexCode(texData.latex_code);
+        }
+      };
+
+      const handleTemplateChange = async (newTemplateId) => {
+        setTemplateId(newTemplateId);
+        if (structuredResume) {
+          await renderOutputs(structuredResume, newTemplateId);
+        }
+      };
+
+      const handleOptimize = async () => {
+        if (!resumeText.trim() || !jobDesc.trim()) {
+          setError("Paste both your resume text and the job description.");
+          return;
+        }
+        setError("");
+        setLoading(true);
+        try {
+          const res = await fetch("/api/analyze", {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              resume_text: resumeText,
+              job_description: jobDesc,
+              extra_instructions: extraInstructions,
+              template_id: templateId,
+            }),
+          });
+          const data = await res.json();
+          if (!res.ok) throw new Error(data.detail || "Analysis failed");
+
+          setAnalysis(data);
+          setStructuredResume(data.structured_resume);
+          setLatexCode(data.latex_code);
+          await renderOutputs(data.structured_resume, templateId);
+
+          saveVersion({
+            id: Date.now(),
+            timestamp: new Date().toLocaleString(),
+            score: data.ats_score,
+            templateId,
+            resumeText,
+            jobDesc,
+            extraInstructions,
+            analysis: data,
+            structuredResume: data.structured_resume,
+          });
+        } catch (e) {
+          setError(e.message);
+        } finally {
+          setLoading(false);
+        }
+      };
+
+      const loadVersion = async (v) => {
+        setResumeText(v.resumeText);
+        setJobDesc(v.jobDesc);
+        setExtraInstructions(v.extraInstructions || "");
+        setTemplateId(v.templateId);
+        setAnalysis(v.analysis);
+        setStructuredResume(v.structuredResume);
+        await renderOutputs(v.structuredResume, v.templateId);
+      };
+
+      const downloadTex = () => {
+        const blob = new Blob([latexCode], { type: "text/plain" });
+        const a = document.createElement("a");
+        a.href = URL.createObjectURL(blob);
+        a.download = `resume_${templateId}.tex`;
+        a.click();
+      };
+
+      return (
+        <div className="min-h-screen flex flex-col">
+          {/* Header */}
+          <header className="bg-slate-900 text-white px-6 py-3 flex flex-wrap items-center justify-between gap-2">
+            <div className="flex items-center gap-3">
+              <span className="font-bold text-lg tracking-tight">ATS Resume Utility</span>
+              <span className="text-xs bg-slate-800 border border-slate-700 px-2.5 py-0.5 rounded text-emerald-300 font-mono">
+                Model: {activeModel}
+              </span>
+            </div>
+            <div className="flex items-center gap-3">
+              <select
+                value={templateId}
+                onChange={(e) => handleTemplateChange(e.target.value)}
+                className="bg-slate-800 text-sm border border-slate-600 rounded px-2.5 py-1.5"
+              >
+                {TEMPLATES.map((t) => (
+                  <option key={t.id} value={t.id}>{t.name}</option>
+                ))}
+              </select>
+              <button
+                onClick={handleOptimize}
+                disabled={loading}
+                className="bg-blue-600 hover:bg-blue-500 disabled:opacity-50 text-sm font-medium px-4 py-1.5 rounded"
+              >
+                {loading ? "Analyzing..." : "Analyze & Generate"}
+              </button>
+            </div>
+          </header>
+
+          {error && (
+            <div className="bg-red-100 border-b border-red-300 text-red-800 px-6 py-2 text-sm">
+              {error}
+            </div>
+          )}
+
+          {/* Main 3-Column Utility Workspace */}
+          <main className="flex-1 grid grid-cols-1 lg:grid-cols-12 gap-4 p-4">
+            {/* Column 1: Paste Inputs + Extra Commands + Version History */}
+            <div className="lg:col-span-4 flex flex-col gap-3">
+              <div className="bg-white p-3 rounded border border-slate-200 flex flex-col gap-1.5">
+                <label className="text-xs font-semibold uppercase text-slate-500">1. Paste Raw Resume Text</label>
+                <textarea
+                  rows="7"
+                  value={resumeText}
+                  onChange={(e) => setResumeText(e.target.value)}
+                  placeholder="Paste plain text of your current resume..."
+                  className="w-full text-xs font-mono border border-slate-300 rounded p-2 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="bg-white p-3 rounded border border-slate-200 flex flex-col gap-1.5">
+                <label className="text-xs font-semibold uppercase text-slate-500">2. Paste Target Job Description</label>
+                <textarea
+                  rows="6"
+                  value={jobDesc}
+                  onChange={(e) => setJobDesc(e.target.value)}
+                  placeholder="Paste target job posting..."
+                  className="w-full text-xs font-mono border border-slate-300 rounded p-2 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              <div className="bg-white p-3 rounded border border-slate-200 flex flex-col gap-1.5">
+                <label className="text-xs font-semibold uppercase text-slate-500">3. Extra Commands / Instructions (Optional)</label>
+                <textarea
+                  rows="3"
+                  value={extraInstructions}
+                  onChange={(e) => setExtraInstructions(e.target.value)}
+                  placeholder="e.g., Expand experience bullets to fill 1 full page, emphasize Python/FastAPI, use senior-level action verbs..."
+                  className="w-full text-xs font-mono border border-slate-300 rounded p-2 focus:outline-none focus:border-blue-500"
+                />
+              </div>
+
+              {/* Version History */}
+              <div className="bg-white p-3 rounded border border-slate-200 flex-1">
+                <div className="flex justify-between items-center mb-2">
+                  <span className="text-xs font-semibold uppercase text-slate-500">Version History ({history.length})</span>
+                  {history.length > 0 && (
+                    <button
+                      onClick={() => { localStorage.removeItem("ats_resume_versions"); setHistory([]); }}
+                      className="text-xs text-red-600 hover:underline"
+                    >
+                      Clear
+                    </button>
+                  )}
+                </div>
+                <div className="space-y-1.5 max-h-36 overflow-y-auto">
+                  {history.length === 0 && <p className="text-xs text-slate-400">No saved runs yet.</p>}
+                  {history.map((v) => (
+                    <button
+                      key={v.id}
+                      onClick={() => loadVersion(v)}
+                      className="w-full text-left text-xs p-2 rounded border border-slate-200 hover:bg-slate-50 flex justify-between items-center"
+                    >
+                      <span>{v.timestamp} ({v.templateId})</span>
+                      <span className="font-bold text-blue-700">ATS: {v.score}%</span>
+                    </button>
+                  ))}
+                </div>
+              </div>
+            </div>
+
+            {/* Column 2: ATS Keyword Analysis + LaTeX Source */}
+            <div className="lg:col-span-4 flex flex-col gap-4">
+              <div className="bg-white p-3 rounded border border-slate-200">
+                <div className="flex items-center justify-between mb-2">
+                  <span className="text-xs font-semibold uppercase text-slate-500">ATS Keyword Analysis</span>
+                  {analysis && (
+                    <span className="text-sm font-bold px-2 py-0.5 rounded bg-blue-50 text-blue-700">
+                      Match Score: {analysis.ats_score}%
+                    </span>
+                  )}
+                </div>
+
+                {!analysis ? (
+                  <p className="text-xs text-slate-400">Run analysis to view matched and missing keywords.</p>
+                ) : (
+                  <div className="space-y-3 text-xs">
+                    <div>
+                      <span className="font-semibold text-emerald-700 block mb-1">Matched Keywords:</span>
+                      <div className="flex flex-wrap gap-1">
+                        {analysis.matched_keywords.map((kw, i) => (
+                          <span key={i} className="bg-emerald-100 text-emerald-800 px-1.5 py-0.5 rounded">{kw}</span>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="font-semibold text-amber-700 block mb-1">Missing Keywords:</span>
+                      <div className="flex flex-wrap gap-1">
+                        {analysis.missing_keywords.map((kw, i) => (
+                          <span key={i} className="bg-amber-100 text-amber-800 px-1.5 py-0.5 rounded">{kw}</span>
+                        ))}
+                      </div>
+                    </div>
+                    <div>
+                      <span className="font-semibold text-slate-700 block mb-1">Actionable Edits:</span>
+                      <ul className="list-disc pl-4 space-y-0.5 text-slate-600">
+                        {analysis.suggestions.map((s, i) => <li key={i}>{s}</li>)}
+                      </ul>
+                    </div>
+                  </div>
+                )}
+              </div>
+
+              {/* Generated LaTeX Source */}
+              <div className="bg-white p-3 rounded border border-slate-200 flex-1 flex flex-col gap-2">
+                <div className="flex justify-between items-center">
+                  <span className="text-xs font-semibold uppercase text-slate-500">LaTeX Source ({templateId})</span>
+                  <button
+                    onClick={downloadTex}
+                    disabled={!latexCode}
+                    className="text-xs border border-slate-300 hover:bg-slate-50 px-2.5 py-1 rounded disabled:opacity-40"
+                  >
+                    Download .tex
+                  </button>
+                </div>
+                <textarea
+                  value={latexCode}
+                  onChange={(e) => setLatexCode(e.target.value)}
+                  placeholder="Generated LaTeX code will appear here..."
+                  className="w-full flex-1 min-h-[260px] text-xs font-mono border border-slate-300 rounded p-2 bg-slate-50"
+                />
+              </div>
+            </div>
+
+            {/* Column 3: Guaranteed Live PDF Preview */}
+            <div className="lg:col-span-4 bg-white p-3 rounded border border-slate-200 flex flex-col">
+              <div className="flex justify-between items-center mb-2">
+                <span className="text-xs font-semibold uppercase text-slate-500">PDF Preview</span>
+                {pdfUrl && (
+                  <a
+                    href={pdfUrl}
+                    download={`resume_${templateId}.pdf`}
+                    className="text-xs bg-emerald-600 hover:bg-emerald-500 text-white font-medium px-3 py-1 rounded"
+                  >
+                    Download PDF
+                  </a>
+                )}
+              </div>
+
+              {pdfUrl ? (
+                <iframe src={pdfUrl} className="w-full flex-1 min-h-[540px] border border-slate-200 rounded" />
+              ) : (
+                <div className="flex-1 min-h-[540px] border border-dashed border-slate-300 rounded flex items-center justify-center p-6 text-center text-xs text-slate-400">
+                  PDF preview will render here immediately after generation.
+                </div>
+              )}
+            </div>
+          </main>
+        </div>
+      );
+    }
+
+    ReactDOM.createRoot(document.getElementById("root")).render(<App />);
+  </script>
+</body>
+</html>
